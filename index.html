@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>販售牆 MVP</title>
+  <!-- Tailwind CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Supabase JS v2 -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    .grid-auto-fit { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-800">
+  <div class="max-w-4xl mx-auto p-4 sm:p-6">
+    <header class="flex items-center justify-between mb-6">
+      <h1 class="text-2xl font-bold">販售牆 MVP</h1>
+      <div id="me" class="text-xs text-gray-500"></div>
+    </header>
+
+    <!-- 發文卡片 -->
+    <section class="bg-white rounded-2xl shadow p-4 sm:p-6 mb-6">
+      <h2 class="font-semibold mb-4">我要賣</h2>
+      <form id="postForm" class="space-y-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <label class="block">
+            <span class="text-sm">標題</span>
+            <input id="title" required maxlength="120" class="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="如：iPhone 12 128G" />
+          </label>
+          <label class="block">
+            <span class="text-sm">價格（TWD）</span>
+            <input id="price" required type="number" min="0" step="1" class="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="3000" />
+          </label>
+        </div>
+        <label class="block">
+          <span class="text-sm">描述</span>
+          <textarea id="desc" rows="3" class="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="九成新，含原盒。台北可面交，站內聊。"></textarea>
+        </label>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <label class="block">
+            <span class="text-sm">聯絡方式（可選）</span>
+            <input id="contact" class="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="LINE / 電話 / IG" />
+          </label>
+          <label class="block">
+            <span class="text-sm">上傳圖片（1-5 張）</span>
+            <input id="images" type="file" accept="image/*" multiple class="mt-1 w-full" />
+          </label>
+        </div>
+        <div class="flex items-center gap-3">
+          <button class="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50" id="btnPublish" type="submit">發佈</button>
+          <span id="postHint" class="text-sm text-gray-500"></span>
+        </div>
+      </form>
+    </section>
+
+    <!-- 搜尋/排序 -->
+    <section class="flex flex-col sm:flex-row sm:items-center gap-3 mb-4">
+      <input id="q" placeholder="搜尋標題/描述…" class="flex-1 rounded-xl border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+      <select id="sort" class="rounded-xl border border-gray-300 px-3 py-2">
+        <option value="new">最新</option>
+        <option value="cheap">價格低→高</option>
+        <option value="exp">價格高→低</option>
+      </select>
+      <button id="btnRefresh" class="px-4 py-2 rounded-xl bg-gray-900 text-white">重新整理</button>
+    </section>
+
+    <!-- 貼文牆 -->
+    <section id="feed" class="grid-auto-fit"></section>
+
+    <footer class="mt-10 text-center text-xs text-gray-500">
+      <p>此為示範原型。請於 Supabase 內設定資料表/儲存桶與存取政策。</p>
+    </footer>
+  </div>
+
+<script>
+/**
+ * ====== 設定區（請替換 Storage bucket 名稱如有不同） ======
+ */
+const SUPABASE_URL = "https://bpvirmrctiucticjtjtp.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJwdmlybXJjdGl1Y3RpY2p0anRwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI3NzIxNzYsImV4cCI6MjA3ODM0ODE3Nn0.1Vx-WzBpwXD7GJDooKiTW3dKgfl_QWPfMxAOkVYZ87U";
+const BUCKET = "post-images"; // 需存在 Storage，並設 public
+
+// 初始化 Supabase
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// 生成/取得本機匿名 ID（前端本地識別）
+const localTokenKey = 'sale_wall_token_v1';
+let localToken = localStorage.getItem(localTokenKey);
+if (!localToken) {
+  localToken = crypto.randomUUID();
+  localStorage.setItem(localTokenKey, localToken);
+}
+document.getElementById('me').textContent = `我的匿名代碼：${localToken.slice(0,8)}…（此裝置專用）`;
+
+// DOM
+const feed = document.getElementById('feed');
+const form = document.getElementById('postForm');
+const q = document.getElementById('q');
+const sort = document.getElementById('sort');
+const btnRefresh = document.getElementById('btnRefresh');
+const btnPublish = document.getElementById('btnPublish');
+const postHint = document.getElementById('postHint');
+
+btnRefresh.addEventListener('click', () => loadPosts());
+q.addEventListener('keyup', (e)=>{ if(e.key==='Enter') loadPosts(); });
+sort.addEventListener('change', loadPosts);
+
+// 上傳圖片到 Storage，回傳公開 URL 陣列
+async function uploadImages(files) {
+  const urls = [];
+  const datePrefix = new Date().toISOString().slice(0,10);
+  for (const file of files) {
+    const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+    const path = `${datePrefix}/${crypto.randomUUID()}.${ext}`;
+    const { error } = await supabase.storage.from(BUCKET).upload(path, file, {
+      cacheControl: '3600', upsert: false
+    });
+    if (error) throw error;
+    const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
+    urls.push(data.publicUrl);
+  }
+  return urls;
+}
+
+// 建立貼文
+form.addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  btnPublish.disabled = true;
+  postHint.textContent = '上傳中…';
+
+  try {
+    const title = document.getElementById('title').value.trim();
+    const price = parseInt(document.getElementById('price').value || '0', 10);
+    const description = document.getElementById('desc').value.trim();
+    const contact = document.getElementById('contact').value.trim();
+    const imgs = document.getElementById('images').files;
+
+    if (!title || isNaN(price)) throw new Error('請輸入標題與合法價格');
+    if (imgs.length === 0) throw new Error('至少上傳 1 張商品圖');
+    if (imgs.length > 5) throw new Error('最多 5 張圖片');
+
+    // 1) 上傳圖片
+    const imageUrls = await uploadImages(imgs);
+
+    // 2) 寫入資料表
+    const { error: insertErr } = await supabase.from('posts').insert({
+      title, description, price, image_urls: imageUrls, contact, user_token: localToken
+    });
+    if (insertErr) throw insertErr;
+
+    // 3) 清表單 + 重新載入
+    form.reset();
+    postHint.textContent = '已發佈！';
+    await loadPosts();
+  } catch (err) {
+    console.error(err);
+    postHint.textContent = `失敗：${err.message || err}`;
+  } finally {
+    btnPublish.disabled = false;
+    setTimeout(()=> postHint.textContent = '', 2500);
+  }
+});
+
+// 載入貼文列表
+async function loadPosts() {
+  feed.innerHTML = '<div class="col-span-full text-center text-gray-500">載入中…</div>';
+  let query = supabase.from('posts').select('*');
+
+  // 排序
+  const s = sort.value;
+  if (s === 'cheap') query = query.order('price', { ascending: true });
+  else if (s === 'exp') query = query.order('price', { ascending: false });
+  else query = query.order('created_at', { ascending: false });
+
+  const { data, error } = await query.limit(60);
+  if (error) {
+    feed.innerHTML = `<div class='col-span-full text-center text-red-600'>讀取失敗：${error.message}</div>`;
+    return;
+  }
+
+  // 前端關鍵字過濾
+  const keyword = q.value.trim().toLowerCase();
+  const rows = (keyword)
+    ? data.filter(r => (r.title + ' ' + (r.description||'')).toLowerCase().includes(keyword))
+    : data;
+
+  if (!rows.length) {
+    feed.innerHTML = '<div class="col-span-full text-center text-gray-500">沒有貼文</div>';
+    return;
+  }
+
+  feed.innerHTML = '';
+  for (const post of rows) feed.appendChild(renderCard(post));
+}
+
+// 卡片
+function renderCard(post){
+  const el = document.createElement('article');
+  el.className = 'bg-white rounded-2xl shadow overflow-hidden flex flex-col';
+
+  const mainImg = post.image_urls?.[0] || '';
+  const gallery = (post.image_urls||[]).map((u,i)=>
+    `<img data-idx="${i}" src="${u}" alt="img${i}" class="h-10 w-10 object-cover rounded cursor-pointer border"/>`
+  ).join('');
+
+  el.innerHTML = `
+    <div class="relative">
+      ${ mainImg ? `<img src="${mainImg}" class="w-full h-56 object-cover"/>` : '' }
+      <div class="absolute bottom-2 right-2 bg-white/80 rounded-xl px-2 py-1 text-xs">$${Number(post.price||0).toLocaleString()}</div>
+    </div>
+    <div class="p-4 flex-1 flex flex-col gap-2">
+      <h3 class="font-semibold line-clamp-1">${escapeHtml(post.title)}</h3>
+      ${ post.description ? `<p class="text-sm text-gray-600 line-clamp-3">${escapeHtml(post.description)}</p>` : '' }
+      ${ post.contact ? `<p class="text-sm">聯絡：<span class="font-medium">${escapeHtml(post.contact)}</span></p>` : '' }
+      ${ (post.image_urls||[]).length>1 ? `<div class="flex gap-2 mt-2">${gallery}</div>` : '' }
+      <div class="flex justify-between items-center pt-2 mt-auto">
+        <span class="text-xs text-gray-500">${new Date(post.created_at).toLocaleString()}</span>
+        <div class="flex items-center gap-2">
+          ${ post.user_token===localToken ? `<button data-id="${post.id}" class="btn-del px-3 py-1 rounded-lg border text-red-600 border-red-300">刪除</button>` : '' }
+        </div>
+      </div>
+    </div>`;
+
+  // 小縮圖切換
+  el.querySelectorAll('img[data-idx]')?.forEach(img=>{
+    img.addEventListener('click', ()=> el.querySelector('img.w-full')?.setAttribute('src', img.src));
+  });
+
+  // 刪除（目前使用測試策略 delete-any；之後建議換 RPC）
+  const del = el.querySelector('.btn-del');
+  if (del) {
+    del.addEventListener('click', async ()=>{
+      if (!confirm('確定刪除這則貼文？')) return;
+      const { error } = await supabase.from('posts')
+        .delete()
+        .eq('id', del.dataset.id)
+        .eq('user_token', localToken);
+      if (error) return alert('刪除失敗：' + error.message);
+      el.remove();
+    });
+  }
+
+  return el;
+}
+
+// HTML 逃逸
+function escapeHtml(str){
+  return (str||'').replace(/[&<>"']/g, (c)=>({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[c]);
+}
+
+// 初始載入
+loadPosts();
+</script>
+</body>
+</html>
